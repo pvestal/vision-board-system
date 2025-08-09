@@ -11,6 +11,11 @@ import asyncio
 import json
 import uuid
 import logging
+import sys
+from pathlib import Path
+
+# Add agents directory to path
+sys.path.insert(0, str(Path(__file__).parent / ".." / "agents"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,6 +37,8 @@ class InteractiveVisionBoard:
         self.websocket_clients: Set[WebSocket] = set()
         self.active_conversations = {}
         self.user_decisions = {}
+        self.real_agents = {}
+        self._initialize_real_agents()
         
     def _init_board_members(self):
         """Initialize board members"""
@@ -86,12 +93,41 @@ class InteractiveVisionBoard:
             }
         }
     
+    def _initialize_real_agents(self):
+        """Initialize real agent connections"""
+        try:
+            # Import and initialize CTO agent
+            from cto_agent import CTOAgent
+            self.real_agents["tech-cto"] = CTOAgent()
+            logger.info("CTO Agent initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize CTO Agent: {e}")
+        
+        try:
+            # Import and initialize CFO agent
+            from cfo_agent import CFOAgent
+            self.real_agents["finance-cfo"] = CFOAgent()
+            # Update board members to include CFO
+            self.board_members["finance-cfo"] = {
+                "id": "finance-cfo",
+                "name": "Sarah Finance",
+                "role": "CFO", 
+                "avatar": "💰",
+                "status": "active",
+                "expertise": ["budget", "roi", "financial planning"]
+            }
+            logger.info("CFO Agent initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize CFO Agent: {e}")
+    
     def analyze_task(self, topic: str) -> Dict:
         """Simple task analysis"""
         topic_lower = topic.lower()
         
         # Determine domain and complexity
-        if 'security' in topic_lower or 'auth' in topic_lower:
+        if 'budget' in topic_lower or 'cost' in topic_lower or 'financial' in topic_lower or 'roi' in topic_lower:
+            return {"domain": "financial", "complexity": "medium", "chair": "finance-cfo"}
+        elif 'security' in topic_lower or 'auth' in topic_lower:
             return {"domain": "security", "complexity": "high", "chair": "security-cso"}
         elif 'deploy' in topic_lower or 'infrastructure' in topic_lower:
             return {"domain": "infrastructure", "complexity": "medium", "chair": "ops-coo"}
@@ -116,7 +152,10 @@ class InteractiveVisionBoard:
         }
         
         # Add team members based on domain
-        if domain == "technical":
+        if domain == "financial":
+            resources["team"] = ["finance-cfo", "vision-ceo", "ops-coo"]
+            resources["tools"] = ["Financial Modeling", "Budget Tracking", "ROI Calculator"]
+        elif domain == "technical":
             resources["team"] = ["tech-cto", "ops-coo", "data-cdo"]
             resources["tools"] = ["Development Environment", "CI/CD Pipeline"]
         elif domain == "security":
@@ -234,19 +273,8 @@ class InteractiveVisionBoard:
                     }
                 })
                 
-                # Generate department-specific input
-                if member["role"] == "CTO":
-                    opinion = f"From a technical perspective: We'll need proper architecture design, API development, and thorough testing. I recommend microservices approach."
-                elif member["role"] == "CSO":
-                    opinion = f"Security requirements: We must implement authentication, encryption, and compliance checks. I'll conduct threat modeling."
-                elif member["role"] == "COO":
-                    opinion = f"Operations plan: I'll prepare deployment pipelines, monitoring dashboards, and ensure 99.9% uptime SLA."
-                elif member["role"] == "CDO":
-                    opinion = f"Data strategy: I'll design the schema, set up analytics, and ensure data governance compliance."
-                elif member["role"] == "CCO":
-                    opinion = f"UX approach: I'll create wireframes, ensure dark theme by default (per user preferences), and conduct user testing."
-                else:
-                    opinion = f"I'll contribute my expertise in {', '.join(member['expertise'])} to ensure success."
+                # Generate department-specific input using real agents when available
+                opinion = await self._generate_agent_response(member_id, topic, task_analysis, resources)
                 
                 await self.broadcast({
                     "type": "member_opinion",
@@ -314,6 +342,67 @@ class InteractiveVisionBoard:
         }
         
         return conversation_id
+    
+    async def _generate_agent_response(self, member_id: str, topic: str, task_analysis: Dict, resources: Dict) -> str:
+        """Generate response using real agent or fallback to simulated response"""
+        
+        # Check if we have a real agent for this member
+        if member_id in self.real_agents:
+            try:
+                agent = self.real_agents[member_id]
+                logger.info(f"Using real agent for {member_id}: {topic}")
+                
+                # Execute task with the agent
+                context = {
+                    'task_analysis': task_analysis,
+                    'resources': resources,
+                    'domain': task_analysis.get('domain'),
+                    'complexity': task_analysis.get('complexity')
+                }
+                
+                result = await agent.execute_task(topic, context)
+                
+                # Extract a concise opinion from the result for the chat
+                if member_id == "tech-cto" and result.get('status') == 'completed':
+                    analysis = result.get('analysis', {})
+                    return f"Technical Analysis: {analysis.get('complexity', 'medium')} complexity, estimated {analysis.get('estimated_effort', '3-5 days')}. I'll handle architecture design and implementation. {analysis.get('recommendations', [''])[0] if analysis.get('recommendations') else ''}"
+                
+                elif member_id == "finance-cfo" and result.get('status') == 'completed':
+                    budget_analysis = result.get('budget_analysis', {})
+                    if budget_analysis:
+                        cost = budget_analysis.get('estimated_cost', 0)
+                        roi = budget_analysis.get('roi_analysis', {})
+                        approval = budget_analysis.get('approval_status', 'pending')
+                        return f"Financial Analysis: Estimated cost ${cost:,.0f}, ROI: {roi.get('three_year_roi_percentage', 0):.1f}% over 3 years. Status: {approval.upper()}. {budget_analysis.get('recommendation', '')}"
+                
+                # Fallback for other agents or failed execution
+                if result.get('status') == 'failed':
+                    return f"I encountered an issue analyzing this task: {result.get('error', 'Unknown error')}. Will provide manual assessment."
+                else:
+                    return f"I've analyzed the task and will execute my role-specific responsibilities."
+                    
+            except Exception as e:
+                logger.error(f"Error using real agent {member_id}: {e}")
+                # Fall through to simulated response
+        
+        # Fallback to simulated responses
+        member = self.board_members[member_id]
+        role = member["role"]
+        
+        if role == "CTO":
+            return f"From a technical perspective: We'll need proper architecture design, API development, and thorough testing. I recommend microservices approach."
+        elif role == "CFO":
+            return f"Financial assessment: I'll analyze the budget requirements and ROI projections. Need to ensure this aligns with our financial goals."
+        elif role == "CSO":
+            return f"Security requirements: We must implement authentication, encryption, and compliance checks. I'll conduct threat modeling."
+        elif role == "COO":
+            return f"Operations plan: I'll prepare deployment pipelines, monitoring dashboards, and ensure 99.9% uptime SLA."
+        elif role == "CDO":
+            return f"Data strategy: I'll design the schema, set up analytics, and ensure data governance compliance."
+        elif role == "CCO":
+            return f"UX approach: I'll create wireframes, ensure dark theme by default (per user preferences), and conduct user testing."
+        else:
+            return f"I'll contribute my expertise in {', '.join(member['expertise'])} to ensure success."
     
     async def process_decision(self, conversation_id: str, decision_id: str, value: str):
         """Process user decision"""
