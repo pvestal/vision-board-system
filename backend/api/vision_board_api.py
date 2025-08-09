@@ -17,6 +17,8 @@ import sys
 import logging
 from dataclasses import dataclass, asdict
 import uuid
+import aiofiles
+import aiohttp
 
 # Add agents directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'agents'))
@@ -93,7 +95,233 @@ class ResourceAllocation:
     completed_at: str = ""
     dependencies: List[str] = None  # other task_ids this depends on
     resource_requirements: Dict[str, Any] = None  # memory, cpu, storage needs
+
+class KnowledgeBaseIntegration:
+    """Integration with Knowledge Base for decision storage and learning"""
     
+    def __init__(self, kb_url: str = "http://192.168.50.135:8307", storage_dir: str = "./data"):
+        self.kb_url = kb_url
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(exist_ok=True)
+        self.kb_available = False
+        
+    async def check_kb_health(self) -> bool:
+        """Check if Knowledge Base is available"""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                async with session.get(f"{self.kb_url}/health") as response:
+                    self.kb_available = response.status == 200
+                    return self.kb_available
+        except Exception as e:
+            logger.warning(f"Knowledge Base not available: {e}")
+            self.kb_available = False
+            return False
+    
+    async def save_decision(self, decision_data: Dict) -> bool:
+        """Save board decision to Knowledge Base or local storage"""
+        
+        # Try Knowledge Base first
+        if await self.check_kb_health():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.kb_url}/api/articles",
+                        json={
+                            "title": f"Board Decision: {decision_data.get('topic', 'Unknown')}",
+                            "content": self._format_decision_content(decision_data),
+                            "category": "Conversations",
+                            "tags": ["vision-board", "decision", decision_data.get('type', 'general')],
+                            "author": "Vision Board",
+                            "private": False
+                        },
+                        headers={"Content-Type": "application/json"}
+                    ) as response:
+                        if response.status == 200:
+                            logger.info("Decision saved to Knowledge Base")
+                            return True
+            except Exception as e:
+                logger.error(f"Failed to save to Knowledge Base: {e}")
+        
+        # Fallback to local storage
+        return await self._save_decision_local(decision_data)
+    
+    async def save_task_result(self, task_data: Dict) -> bool:
+        """Save task execution result to Knowledge Base"""
+        
+        if await self.check_kb_health():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.kb_url}/api/articles",
+                        json={
+                            "title": f"Task Result: {task_data.get('description', 'Unknown Task')}",
+                            "content": self._format_task_content(task_data),
+                            "category": "Solutions",
+                            "tags": ["vision-board", "task-result", task_data.get('agent_id', 'unknown')],
+                            "author": f"Vision Board - {task_data.get('agent_name', 'Unknown Agent')}",
+                            "private": False
+                        }
+                    ) as response:
+                        if response.status == 200:
+                            return True
+            except Exception as e:
+                logger.error(f"Failed to save task result: {e}")
+        
+        return await self._save_task_result_local(task_data)
+    
+    async def save_agent_learning(self, learning_data: Dict) -> bool:
+        """Save agent learning and improvements"""
+        
+        if await self.check_kb_health():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.kb_url}/api/articles",
+                        json={
+                            "title": f"Agent Learning: {learning_data.get('agent_name', 'Unknown Agent')}",
+                            "content": self._format_learning_content(learning_data),
+                            "category": "Infrastructure", 
+                            "tags": ["vision-board", "learning", "improvement"],
+                            "author": "Vision Board System",
+                            "private": False
+                        }
+                    ) as response:
+                        return response.status == 200
+            except Exception as e:
+                logger.error(f"Failed to save learning: {e}")
+        
+        return await self._save_learning_local(learning_data)
+    
+    def _format_decision_content(self, decision_data: Dict) -> str:
+        """Format decision data for Knowledge Base storage"""
+        content = f"""# Board Decision: {decision_data.get('topic', 'Unknown')}
+
+**Date**: {decision_data.get('timestamp', datetime.now().isoformat())}
+**Conversation ID**: {decision_data.get('conversation_id', 'N/A')}
+
+## Participants
+{', '.join(decision_data.get('participants', []))}
+
+## Discussion Summary
+{decision_data.get('summary', 'No summary available')}
+
+## Key Points
+"""
+        
+        messages = decision_data.get('messages', [])
+        for msg in messages[-10:]:  # Last 10 messages
+            content += f"- **{msg.get('member_name', 'Unknown')}**: {msg.get('message', '')}\n"
+        
+        if 'decision' in decision_data:
+            content += f"""
+
+## Final Decision
+{decision_data['decision']}
+
+## Next Actions
+{decision_data.get('next_actions', 'No specific actions identified')}
+"""
+        
+        return content
+    
+    def _format_task_content(self, task_data: Dict) -> str:
+        """Format task result for Knowledge Base"""
+        content = f"""# Task Execution Result
+
+**Task**: {task_data.get('description', 'Unknown Task')}
+**Executed By**: {task_data.get('agent_name', 'Unknown Agent')} ({task_data.get('agent_id', 'unknown')})
+**Completed**: {task_data.get('completed_at', datetime.now().isoformat())}
+**Duration**: {task_data.get('actual_duration_minutes', 0)} minutes
+
+## Task Result
+"""
+        
+        result = task_data.get('result', {})
+        if isinstance(result, dict):
+            if 'analysis' in result:
+                content += f"**Analysis**: {result['analysis']}\n\n"
+            if 'code' in result and result['code']:
+                content += "**Generated Code**:\n```python\n"
+                if 'files' in result['code']:
+                    for filename, code in result['code']['files'].items():
+                        content += f"# {filename}\n{code}\n\n"
+                content += "```\n\n"
+            if 'implementation_plan' in result:
+                plan = result['implementation_plan']
+                content += "**Implementation Plan**:\n"
+                for phase in plan.get('phases', []):
+                    content += f"- Phase {phase.get('phase', '?')}: {phase.get('name', 'Unknown')} ({phase.get('duration', 'Unknown duration')})\n"
+        else:
+            content += f"{result}\n"
+        
+        return content
+    
+    def _format_learning_content(self, learning_data: Dict) -> str:
+        """Format learning data for Knowledge Base"""
+        return f"""# Agent Learning Update
+
+**Agent**: {learning_data.get('agent_name', 'Unknown Agent')}
+**Timestamp**: {learning_data.get('timestamp', datetime.now().isoformat())}
+
+## Performance Metrics
+- **Efficiency Rating**: {learning_data.get('efficiency_rating', 'N/A')}
+- **Tasks Completed**: {learning_data.get('tasks_completed', 0)}
+- **Success Rate**: {learning_data.get('success_rate', 'N/A')}%
+
+## Improvements Identified
+{learning_data.get('improvements', 'No specific improvements identified')}
+
+## System Optimizations
+{learning_data.get('optimizations', 'No optimizations suggested')}
+"""
+    
+    async def _save_decision_local(self, decision_data: Dict) -> bool:
+        """Save decision to local storage"""
+        try:
+            filename = f"decision_{decision_data.get('conversation_id', uuid.uuid4())}.json"
+            filepath = self.storage_dir / "decisions" / filename
+            filepath.parent.mkdir(exist_ok=True)
+            
+            async with aiofiles.open(filepath, 'w') as f:
+                await f.write(json.dumps(decision_data, indent=2, default=str))
+            
+            logger.info(f"Decision saved locally: {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save decision locally: {e}")
+            return False
+    
+    async def _save_task_result_local(self, task_data: Dict) -> bool:
+        """Save task result to local storage"""
+        try:
+            filename = f"task_{task_data.get('task_id', uuid.uuid4())}.json"
+            filepath = self.storage_dir / "tasks" / filename
+            filepath.parent.mkdir(exist_ok=True)
+            
+            async with aiofiles.open(filepath, 'w') as f:
+                await f.write(json.dumps(task_data, indent=2, default=str))
+            
+            logger.info(f"Task result saved locally: {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save task result locally: {e}")
+            return False
+    
+    async def _save_learning_local(self, learning_data: Dict) -> bool:
+        """Save learning data to local storage"""
+        try:
+            filename = f"learning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            filepath = self.storage_dir / "learning" / filename
+            filepath.parent.mkdir(exist_ok=True)
+            
+            async with aiofiles.open(filepath, 'w') as f:
+                await f.write(json.dumps(learning_data, indent=2, default=str))
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save learning locally: {e}")
+            return False
+
 class VisionBoard:
     """Board of Directors management system with resource allocation tracking"""
     
@@ -129,6 +357,9 @@ class VisionBoard:
             "agent_performance": {},
             "daily_throughput": []
         }
+        
+        # Knowledge Base integration
+        self.kb = KnowledgeBaseIntegration()
         
         self.initialize_board()
         
@@ -253,8 +484,19 @@ class VisionBoard:
             "chairperson": self.chairperson_id
         })
         
-        # Get initial thoughts from each board member
+        # Get initial thoughts from each board members
         await self.gather_opinions(topic, context)
+        
+        # Save conversation start to Knowledge Base
+        await self.kb.save_decision({
+            "conversation_id": conversation_id,
+            "topic": topic,
+            "participants": list(self.board_members.keys()),
+            "timestamp": datetime.now().isoformat(),
+            "type": "conversation_started",
+            "context": context,
+            "messages": []
+        })
         
         return conversation_id
     
@@ -300,6 +542,20 @@ class VisionBoard:
             
             # Update status back to listening
             member.status = "listening"
+        
+        # Save complete conversation to Knowledge Base after all opinions gathered
+        if self.conversation_history:
+            latest_conversation = self.conversation_history[-1]
+            await self.kb.save_decision({
+                "conversation_id": latest_conversation["id"],
+                "topic": latest_conversation["topic"],
+                "participants": latest_conversation["participants"],
+                "timestamp": datetime.now().isoformat(),
+                "type": "board_discussion",
+                "context": latest_conversation.get("context", {}),
+                "messages": latest_conversation["messages"],
+                "summary": f"Board discussion on '{topic}' with {len(latest_conversation['messages'])} contributions"
+            })
     
     async def generate_agent_opinion(self, member: BoardMember, topic: str, context: Dict) -> str:
         """Generate opinion based on agent specialization - delegates to real agents when available"""
@@ -356,6 +612,10 @@ class VisionBoard:
                 }
                 
                 self.improvement_log.append(improvement)
+                
+                # Save learning data to Knowledge Base every 5 cycles
+                if len(self.improvement_log) % 5 == 0:
+                    await self.save_system_learnings(improvement)
                 
                 # Broadcast improvements
                 await self.broadcast_update("autonomous_improvement", improvement)
@@ -591,6 +851,18 @@ class VisionBoard:
         
         # Update metrics
         self.resource_metrics["tasks_completed_today"] += 1
+        
+        # Save task result to Knowledge Base
+        await self.kb.save_task_result({
+            "task_id": task_id,
+            "description": allocation.task_description,
+            "agent_id": allocation.agent_id,
+            "agent_name": allocation.agent_name,
+            "completed_at": allocation.completed_at,
+            "actual_duration_minutes": allocation.actual_duration,
+            "result": result or {},
+            "success": True
+        })
         
         # Broadcast completion
         await self.broadcast_update("task_completed", {
@@ -874,6 +1146,45 @@ class VisionBoard:
             "average_daily": sum(daily_counts) / len(daily_counts) if daily_counts else 0,
             "peak_day": max(daily_completions.items(), key=lambda x: x[1])[0] if daily_completions else None
         }
+    
+    async def save_system_learnings(self, improvement_data: Dict) -> None:
+        """Save system learning and improvements to Knowledge Base"""
+        
+        # Calculate overall system performance
+        total_tasks = len(self.progress_tracker)
+        completed_tasks = len([t for t in self.progress_tracker.values() if t.get("status") == "completed"])
+        success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 100
+        
+        # Get agent performance summary
+        top_performer = None
+        worst_performer = None
+        if self.completion_metrics["agent_performance"]:
+            performances = [(agent_id, data["average_duration"]) 
+                          for agent_id, data in self.completion_metrics["agent_performance"].items()]
+            if performances:
+                top_performer = min(performances, key=lambda x: x[1])[0]  # Fastest
+                worst_performer = max(performances, key=lambda x: x[1])[0]  # Slowest
+        
+        learning_data = {
+            "agent_name": "Vision Board System",
+            "timestamp": datetime.now().isoformat(),
+            "efficiency_rating": self.completion_metrics["success_rate"] / 100,
+            "tasks_completed": self.completion_metrics["tasks_completed_today"],
+            "success_rate": success_rate,
+            "improvements": "\n".join(improvement_data.get("optimizations", [])),
+            "optimizations": f"""System Health: {improvement_data.get('health', {})}
+Agent Performance Summary:
+- Top Performer: {top_performer or 'N/A'}
+- Needs Attention: {worst_performer or 'N/A'}
+- Average Completion Time: {self.completion_metrics.get('average_completion_time', 0):.1f} minutes
+- Current Utilization: {self.resource_metrics.get('utilized_capacity', 0)}/{self.resource_metrics.get('total_capacity', 0)}
+
+Recent Model Updates: {len(improvement_data.get('model_updates', []))} available
+System Bottlenecks: {len(self.resource_metrics.get('bottlenecks', []))}
+"""
+        }
+        
+        await self.kb.save_agent_learning(learning_data)
 
 # Global board instance
 vision_board = VisionBoard()
@@ -1141,6 +1452,114 @@ async def execute_board_task(data: Dict[str, Any]):
             "conversation_id": conversation_id,
             "message": "Task discussed by board - check conversation history for results"
         }
+
+@app.get("/api/kb/status")
+async def get_kb_status():
+    """Get Knowledge Base integration status"""
+    kb_available = await vision_board.kb.check_kb_health()
+    
+    # Count local storage files
+    local_decisions = 0
+    local_tasks = 0
+    local_learnings = 0
+    
+    try:
+        decisions_dir = vision_board.kb.storage_dir / "decisions"
+        if decisions_dir.exists():
+            local_decisions = len(list(decisions_dir.glob("*.json")))
+        
+        tasks_dir = vision_board.kb.storage_dir / "tasks"
+        if tasks_dir.exists():
+            local_tasks = len(list(tasks_dir.glob("*.json")))
+            
+        learning_dir = vision_board.kb.storage_dir / "learning"
+        if learning_dir.exists():
+            local_learnings = len(list(learning_dir.glob("*.json")))
+    except Exception as e:
+        logger.error(f"Error counting local files: {e}")
+    
+    return {
+        "knowledge_base": {
+            "url": vision_board.kb.kb_url,
+            "available": kb_available,
+            "status": "connected" if kb_available else "using_local_storage"
+        },
+        "local_storage": {
+            "storage_dir": str(vision_board.kb.storage_dir),
+            "decisions_saved": local_decisions,
+            "tasks_saved": local_tasks,
+            "learnings_saved": local_learnings,
+            "total_items": local_decisions + local_tasks + local_learnings
+        }
+    }
+
+@app.get("/api/kb/sync")
+async def sync_to_kb():
+    """Sync local storage to Knowledge Base when it becomes available"""
+    if not await vision_board.kb.check_kb_health():
+        raise HTTPException(status_code=503, detail="Knowledge Base is not available")
+    
+    synced_items = 0
+    errors = 0
+    
+    try:
+        # Sync decisions
+        decisions_dir = vision_board.kb.storage_dir / "decisions"
+        if decisions_dir.exists():
+            for decision_file in decisions_dir.glob("*.json"):
+                try:
+                    async with aiofiles.open(decision_file, 'r') as f:
+                        decision_data = json.loads(await f.read())
+                    
+                    if await vision_board.kb.save_decision(decision_data):
+                        synced_items += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    logger.error(f"Error syncing decision {decision_file}: {e}")
+                    errors += 1
+        
+        # Sync tasks
+        tasks_dir = vision_board.kb.storage_dir / "tasks"
+        if tasks_dir.exists():
+            for task_file in tasks_dir.glob("*.json"):
+                try:
+                    async with aiofiles.open(task_file, 'r') as f:
+                        task_data = json.loads(await f.read())
+                    
+                    if await vision_board.kb.save_task_result(task_data):
+                        synced_items += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    logger.error(f"Error syncing task {task_file}: {e}")
+                    errors += 1
+        
+        # Sync learnings
+        learning_dir = vision_board.kb.storage_dir / "learning"
+        if learning_dir.exists():
+            for learning_file in learning_dir.glob("*.json"):
+                try:
+                    async with aiofiles.open(learning_file, 'r') as f:
+                        learning_data = json.loads(await f.read())
+                    
+                    if await vision_board.kb.save_agent_learning(learning_data):
+                        synced_items += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    logger.error(f"Error syncing learning {learning_file}: {e}")
+                    errors += 1
+        
+        return {
+            "success": True,
+            "synced_items": synced_items,
+            "errors": errors,
+            "message": f"Synced {synced_items} items to Knowledge Base with {errors} errors"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 @app.get("/api/progress/summary")
 async def get_progress_summary():
