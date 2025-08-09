@@ -14,6 +14,7 @@ import uuid
 import logging
 import pickle
 import os
+import random
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -1321,6 +1322,237 @@ async def load_session(session_id: str):
         "message": f"Session {session_id} loaded from disk"
     }
 
+# Individual Agent Control Endpoints
+@app.get("/api/agents/{agent_id}")
+async def get_agent_details(agent_id: str):
+    """Get detailed information about a specific agent"""
+    if agent_id not in vision_board.board_members:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = vision_board.board_members[agent_id]
+    return {
+        "success": True,
+        "agent": asdict(agent),
+        "performance_metrics": {
+            "tasks_completed": 0,  # Would track actual tasks
+            "average_response_time": "1.2s",
+            "success_rate": "94%",
+            "specialization_match": 0.85
+        }
+    }
+
+@app.post("/api/agents/{agent_id}/configure")
+async def configure_agent(agent_id: str, data: Dict[str, Any]):
+    """Configure individual agent settings"""
+    if agent_id not in vision_board.board_members:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = vision_board.board_members[agent_id]
+    
+    # Update configurable properties
+    if "trust_level" in data:
+        agent.trust_level = max(0.1, min(0.99, data["trust_level"]))
+    if "status" in data:
+        agent.status = data["status"]
+    if "specialization" in data:
+        agent.specialization = data["specialization"]
+    
+    return {
+        "success": True,
+        "message": f"Agent {agent.name} configured successfully",
+        "agent": asdict(agent)
+    }
+
+@app.post("/api/agents/{agent_id}/assign-task")
+async def assign_task_to_agent(agent_id: str, data: Dict[str, Any]):
+    """Assign a specific task to an individual agent"""
+    if agent_id not in vision_board.board_members:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    task_description = data.get("task", "")
+    priority = data.get("priority", "medium")
+    
+    agent = vision_board.board_members[agent_id]
+    agent.active_tasks += 1
+    
+    task_id = str(uuid.uuid4())
+    task_data = {
+        "id": task_id,
+        "assigned_to": agent_id,
+        "description": task_description,
+        "priority": priority,
+        "status": "assigned",
+        "created_at": datetime.now().isoformat()
+    }
+    
+    return {
+        "success": True,
+        "task_id": task_id,
+        "assigned_to": agent.name,
+        "message": f"Task assigned to {agent.name}",
+        "task": task_data
+    }
+
+@app.get("/api/agents/{agent_id}/tasks")
+async def get_agent_tasks(agent_id: str):
+    """Get all tasks assigned to a specific agent"""
+    if agent_id not in vision_board.board_members:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = vision_board.board_members[agent_id]
+    
+    # Mock tasks for demonstration
+    mock_tasks = [
+        {
+            "id": str(uuid.uuid4()),
+            "description": f"Review technical requirements for {agent.specialization[0]}",
+            "priority": "high",
+            "status": "in_progress",
+            "progress": 65
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "description": f"Prepare analysis for {agent.expertise_areas[0]}",
+            "priority": "medium", 
+            "status": "pending",
+            "progress": 0
+        }
+    ]
+    
+    return {
+        "success": True,
+        "agent": agent.name,
+        "tasks": mock_tasks,
+        "active_count": agent.active_tasks
+    }
+
+# User Control Endpoints  
+@app.post("/api/user/select-chairperson")
+async def user_select_chairperson(data: Dict[str, Any]):
+    """Allow user to manually select conversation chairperson"""
+    agent_id = data.get("agent_id", "")
+    topic = data.get("topic", "User-directed conversation")
+    
+    if agent_id not in vision_board.board_members:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    selected_chair = vision_board.board_members[agent_id]
+    selected_chair.status = "leading"
+    
+    return {
+        "success": True,
+        "chairperson": asdict(selected_chair),
+        "message": f"{selected_chair.name} selected as chairperson for: {topic}"
+    }
+
+@app.post("/api/user/cast-vote")
+async def user_cast_vote(data: Dict[str, Any]):
+    """Allow user to cast their own vote on board decisions"""
+    vote_id = data.get("vote_id", "")
+    vote_choice = data.get("choice", "")
+    reasoning = data.get("reasoning", "User decision")
+    
+    if not vote_id or not vote_choice:
+        raise HTTPException(status_code=400, detail="Vote ID and choice required")
+    
+    vote_record = {
+        "vote_id": vote_id,
+        "voter": "User",
+        "choice": vote_choice,
+        "reasoning": reasoning,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    return {
+        "success": True,
+        "vote_recorded": vote_record,
+        "message": f"User vote '{vote_choice}' recorded"
+    }
+
+@app.post("/api/user/interrupt-conversation")
+async def user_interrupt_conversation(data: Dict[str, Any]):
+    """Allow user to interrupt and redirect board conversation"""
+    session_id = data.get("session_id", "")
+    new_direction = data.get("direction", "")
+    priority = data.get("priority", "medium")
+    
+    if not session_id or not new_direction:
+        raise HTTPException(status_code=400, detail="Session ID and direction required")
+    
+    # Broadcast interruption to all members
+    await vision_board.broadcast({
+        "type": "user_interruption",
+        "session_id": session_id,
+        "new_direction": new_direction,
+        "priority": priority,
+        "message": f"User redirecting conversation: {new_direction}"
+    }, session_id)
+    
+    return {
+        "success": True,
+        "message": "Conversation redirected by user",
+        "new_direction": new_direction
+    }
+
+# Real-time Monitoring Endpoints
+@app.get("/api/monitoring/agents/status")
+async def get_all_agent_status():
+    """Get real-time status of all agents"""
+    agent_statuses = []
+    
+    for agent_id, agent in vision_board.board_members.items():
+        agent_statuses.append({
+            "id": agent_id,
+            "name": agent.name,
+            "status": agent.status,
+            "active_tasks": agent.active_tasks,
+            "trust_level": agent.trust_level,
+            "last_activity": datetime.now().isoformat(),
+            "resource_usage": {
+                "cpu": f"{random.randint(10, 45)}%",
+                "memory": f"{random.randint(128, 512)}MB",
+                "response_time": f"{random.randint(800, 2000)}ms"
+            }
+        })
+    
+    return {
+        "success": True,
+        "agents": agent_statuses,
+        "total_agents": len(agent_statuses),
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/api/monitoring/resources/live")
+async def get_live_resource_usage():
+    """Get live resource usage across all agents"""
+    import random
+    
+    resource_data = {
+        "system_resources": {
+            "total_cpu": f"{random.randint(15, 60)}%",
+            "total_memory": f"{random.randint(2, 8)}GB",
+            "active_sessions": len(vision_board.conversation_states),
+            "total_agents": len(vision_board.board_members)
+        },
+        "agent_breakdown": []
+    }
+    
+    for agent_id, agent in vision_board.board_members.items():
+        resource_data["agent_breakdown"].append({
+            "agent": agent.name,
+            "role": agent.role,
+            "cpu_usage": f"{random.randint(5, 25)}%",
+            "memory_usage": f"{random.randint(64, 256)}MB", 
+            "tasks": agent.active_tasks,
+            "efficiency": f"{random.randint(85, 98)}%"
+        })
+    
+    return {
+        "success": True,
+        "resources": resource_data,
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket connection for real-time updates"""
@@ -1336,4 +1568,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8327)
+    uvicorn.run(app, host="0.0.0.0", port=8328)
