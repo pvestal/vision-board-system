@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vision Board - Multi-Agent Board of Directors</title>
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --tower-bg: #0f172a;
+      --tower-surface: #1e293b;
+      --tower-surface-light: #334155;
+      --tower-accent: #475569;
+      --tower-primary: #3b82f6;
+      --tower-secondary: #06b6d4;
+      --tower-text: #f1f5f9;
+      --tower-text-muted: #94a3b8;
+    }
+    
+    body {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: var(--tower-text);
+      min-height: 100vh;
+    }
+    
+    .board-table {
+      background: radial-gradient(ellipse at center, #1e293b 0%, #0f172a 100%);
+      box-shadow: 0 0 100px rgba(59, 130, 246, 0.1);
+    }
+    
+    .member-card {
+      transition: all 0.3s ease;
+      backdrop-filter: blur(10px);
+    }
+    
+    .member-card.speaking {
+      animation: pulse 2s infinite;
+      border-color: #06b6d4;
+      box-shadow: 0 0 30px rgba(6, 182, 212, 0.5);
+    }
+    
+    .member-card.thinking {
+      animation: thinking 1.5s infinite;
+      opacity: 0.8;
+    }
+    
+    .member-card.chairperson {
+      border: 2px solid gold;
+      box-shadow: 0 0 30px rgba(255, 215, 0, 0.3);
+    }
+    
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    
+    @keyframes thinking {
+      0%, 100% { opacity: 0.8; }
+      50% { opacity: 0.5; }
+    }
+    
+    .conversation-bubble {
+      animation: slideIn 0.5s ease;
+    }
+    
+    @keyframes slideIn {
+      from { 
+        opacity: 0;
+        transform: translateX(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+    
+    .improvement-item {
+      animation: fadeIn 0.5s ease;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    
+    .board-table-oval {
+      clip-path: ellipse(45% 35% at 50% 50%);
+    }
+    
+    /* WebSocket status indicator */
+    .ws-status {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      animation: blink 2s infinite;
+    }
+    
+    .ws-connected { background: #10b981; }
+    .ws-disconnected { background: #ef4444; }
+    
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="min-h-screen p-6">
+    <div class="max-w-7xl mx-auto">
+      <!-- Header -->
+      <div class="mb-8 text-center">
+        <h1 class="text-4xl font-bold mb-2">
+          👁️ Vision Board of Directors
+        </h1>
+        <p class="text-gray-400">Multi-Agent Autonomous Decision System</p>
+        <div class="flex justify-center items-center gap-2 mt-2">
+          <div :class="['ws-status', wsConnected ? 'ws-connected' : 'ws-disconnected']"></div>
+          <span class="text-xs text-gray-500">{{ wsConnected ? 'Connected' : 'Disconnected' }}</span>
+        </div>
+      </div>
+
+      <!-- Board Room -->
+      <div class="mb-8">
+        <div class="board-table rounded-3xl p-8 relative">
+          <div class="absolute inset-0 rounded-3xl board-table-oval bg-gray-800/20"></div>
+          
+          <!-- Board Members arranged in oval -->
+          <div class="relative grid grid-cols-4 gap-6">
+            <!-- Top Row -->
+            <div class="col-span-4 flex justify-center gap-6">
+              <div v-for="member in topRowMembers" :key="member.id"
+                :class="['member-card bg-gray-800/50 border border-gray-700 rounded-xl p-4 w-48', 
+                  { 
+                    'speaking': member.status === 'speaking',
+                    'thinking': member.status === 'thinking',
+                    'chairperson': member.id === chairperson
+                  }]"
+                @click="selectChairperson(member.id)">
+                <div class="text-center">
+                  <div class="text-4xl mb-2">{{ member.avatar }}</div>
+                  <div class="font-bold text-sm">{{ member.name }}</div>
+                  <div class="text-xs text-gray-400">{{ member.role }}</div>
+                  <div class="text-xs text-yellow-400 mt-1">Trust: {{ (member.trust_level * 100).toFixed(0) }}%</div>
+                  <div v-if="member.id === chairperson" class="text-xs text-yellow-300 mt-1">👑 Chair</div>
+                  <div v-if="member.status === 'speaking'" class="text-xs text-cyan-400 mt-2">Speaking...</div>
+                  <div v-if="member.status === 'thinking'" class="text-xs text-gray-400 mt-2">Thinking...</div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Middle Rows -->
+            <div class="col-span-1">
+              <div v-for="member in leftMembers" :key="member.id"
+                :class="['member-card bg-gray-800/50 border border-gray-700 rounded-xl p-4 mb-4', 
+                  { 
+                    'speaking': member.status === 'speaking',
+                    'thinking': member.status === 'thinking',
+                    'chairperson': member.id === chairperson
+                  }]"
+                @click="selectChairperson(member.id)">
+                <div class="text-center">
+                  <div class="text-4xl mb-2">{{ member.avatar }}</div>
+                  <div class="font-bold text-sm">{{ member.name }}</div>
+                  <div class="text-xs text-gray-400">{{ member.role }}</div>
+                  <div class="text-xs text-yellow-400 mt-1">Trust: {{ (member.trust_level * 100).toFixed(0) }}%</div>
+                  <div v-if="member.id === chairperson" class="text-xs text-yellow-300 mt-1">👑 Chair</div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Center - Meeting Space -->
+            <div class="col-span-2 flex items-center justify-center">
+              <div class="text-center p-8">
+                <div class="text-2xl font-bold mb-4">{{ currentTopic || 'Board Room' }}</div>
+                <div v-if="activeConversation" class="text-sm text-gray-400">
+                  Conversation ID: {{ activeConversation }}
+                </div>
+              </div>
+            </div>
+            
+            <div class="col-span-1">
+              <div v-for="member in rightMembers" :key="member.id"
+                :class="['member-card bg-gray-800/50 border border-gray-700 rounded-xl p-4 mb-4', 
+                  { 
+                    'speaking': member.status === 'speaking',
+                    'thinking': member.status === 'thinking',
+                    'chairperson': member.id === chairperson
+                  }]"
+                @click="selectChairperson(member.id)">
+                <div class="text-center">
+                  <div class="text-4xl mb-2">{{ member.avatar }}</div>
+                  <div class="font-bold text-sm">{{ member.name }}</div>
+                  <div class="text-xs text-gray-400">{{ member.role }}</div>
+                  <div class="text-xs text-yellow-400 mt-1">Trust: {{ (member.trust_level * 100).toFixed(0) }}%</div>
+                  <div v-if="member.id === chairperson" class="text-xs text-yellow-300 mt-1">👑 Chair</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Control Panel -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+        <!-- Start Conversation -->
+        <div class="bg-gray-800/50 rounded-xl p-6 backdrop-filter backdrop-blur-sm">
+          <h3 class="text-lg font-bold mb-4 text-cyan-400">Start Board Discussion</h3>
+          <input v-model="conversationTopic" type="text" 
+            placeholder="Enter discussion topic..."
+            class="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg mb-3 focus:border-cyan-400 focus:outline-none">
+          <textarea v-model="conversationContext" 
+            placeholder="Additional context (optional)..."
+            rows="3"
+            class="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg mb-3 focus:border-cyan-400 focus:outline-none"></textarea>
+          <button @click="startConversation"
+            class="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition-colors">
+            🎙️ Start Discussion
+          </button>
+        </div>
+
+        <!-- Assign Task -->
+        <div class="bg-gray-800/50 rounded-xl p-6 backdrop-filter backdrop-blur-sm">
+          <h3 class="text-lg font-bold mb-4 text-blue-400">Assign Board Task</h3>
+          <input v-model="taskDescription" type="text"
+            placeholder="Task description..."
+            class="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg mb-3 focus:border-blue-400 focus:outline-none">
+          <select v-model="taskPriority"
+            class="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg mb-3 focus:border-blue-400 focus:outline-none">
+            <option value="1">Low Priority</option>
+            <option value="5">Medium Priority</option>
+            <option value="10">High Priority</option>
+          </select>
+          <button @click="assignTask"
+            class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
+            📋 Assign Task
+          </button>
+        </div>
+
+        <!-- Model Management -->
+        <div class="bg-gray-800/50 rounded-xl p-6 backdrop-filter backdrop-blur-sm">
+          <h3 class="text-lg font-bold mb-4 text-purple-400">Model Management</h3>
+          <div class="space-y-2 mb-3">
+            <div v-for="model in availableModels" :key="model.name" 
+              class="flex justify-between items-center text-sm">
+              <span>{{ model.name }}</span>
+              <button v-if="model.status === 'update_available'"
+                @click="downloadModel(model.name)"
+                class="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-xs rounded">
+                Download
+              </button>
+              <span v-else class="text-xs text-green-400">✓ Ready</span>
+            </div>
+          </div>
+          <button @click="checkModelUpdates"
+            class="w-full px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors">
+            🔄 Check Updates
+          </button>
+        </div>
+      </div>
+
+      <!-- Conversation & Improvements -->
+      <!-- Decision Points Panel -->
+      <div v-if="pendingDecisions.length > 0" class="mb-6 bg-yellow-900/30 border-2 border-yellow-500 rounded-xl p-6">
+        <h3 class="text-lg font-bold mb-4 text-yellow-400">🎯 Your Input Required</h3>
+        <div class="space-y-4">
+          <div v-for="decision in pendingDecisions" :key="decision.id" class="bg-gray-900/50 rounded-lg p-4">
+            <p class="text-white font-semibold mb-3">{{ decision.question }}</p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <button v-for="option in decision.options" :key="option.value"
+                @click="makeDecision(decision.id, option.value)"
+                class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors flex items-center justify-center gap-2">
+                <span>{{ option.icon }}</span>
+                <span>{{ option.label }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Conversation Stream -->
+        <div class="bg-gray-800/50 rounded-xl p-6 backdrop-filter backdrop-blur-sm">
+          <h3 class="text-lg font-bold mb-4 text-cyan-400">Board Discussion</h3>
+          <div class="h-96 overflow-y-auto space-y-3">
+            <div v-for="message in conversationMessages" :key="message.timestamp"
+              class="conversation-bubble bg-gray-900 rounded-lg p-3">
+              <div class="flex items-start gap-3">
+                <div class="text-2xl">{{ getMemberAvatar(message.member_id) }}</div>
+                <div class="flex-1">
+                  <div class="flex justify-between items-start mb-1">
+                    <span class="font-bold text-sm">{{ message.member_name }}</span>
+                    <span class="text-xs text-gray-500">{{ message.role }}</span>
+                  </div>
+                  <p class="text-sm text-gray-300">{{ message.message || message.opinion }}</p>
+                  <div class="text-xs text-gray-500 mt-1">{{ formatTime(message.timestamp) }}</div>
+                </div>
+              </div>
+            </div>
+            <div v-if="conversationMessages.length === 0" class="text-center text-gray-500">
+              No active discussion. Start a conversation above.
+            </div>
+          </div>
+        </div>
+
+        <!-- Autonomous Improvements -->
+        <div class="bg-gray-800/50 rounded-xl p-6 backdrop-filter backdrop-blur-sm">
+          <h3 class="text-lg font-bold mb-4 text-green-400">Autonomous Improvements</h3>
+          <div class="h-96 overflow-y-auto space-y-3">
+            <div v-for="improvement in improvements" :key="improvement.timestamp"
+              class="improvement-item bg-gray-900 rounded-lg p-3">
+              <div class="text-xs text-gray-500 mb-2">{{ formatTime(improvement.timestamp) }}</div>
+              
+              <!-- Health Status -->
+              <div class="mb-2">
+                <span class="text-xs font-bold text-green-400">System Health:</span>
+                <span class="text-xs ml-2">{{ improvement.health.status }}</span>
+                <span class="text-xs ml-2 text-gray-400">{{ improvement.health.agents_active }} agents active</span>
+              </div>
+              
+              <!-- Model Updates -->
+              <div v-if="improvement.model_updates.length > 0" class="mb-2">
+                <span class="text-xs font-bold text-purple-400">Model Updates:</span>
+                <div v-for="update in improvement.model_updates" :key="update.model" class="text-xs ml-2">
+                  {{ update.model }}: {{ update.status }}
+                </div>
+              </div>
+              
+              <!-- Optimizations -->
+              <div v-if="improvement.optimizations.length > 0">
+                <span class="text-xs font-bold text-blue-400">Suggestions:</span>
+                <div v-for="opt in improvement.optimizations" :key="opt" class="text-xs ml-2 text-gray-400">
+                  • {{ opt }}
+                </div>
+              </div>
+            </div>
+            <div v-if="improvements.length === 0" class="text-center text-gray-500">
+              Autonomous improvement system initializing...
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp } = Vue;
+    
+    createApp({
+      data() {
+        return {
+          wsConnected: false,
+          ws: null,
+          boardMembers: [],
+          chairperson: 'vision-guardian',
+          activeConversation: null,
+          currentTopic: '',
+          conversationTopic: '',
+          conversationContext: '',
+          taskDescription: '',
+          taskPriority: 5,
+          conversationMessages: [],
+          improvements: [],
+          pendingDecisions: [],
+          conversationId: null,
+          availableModels: [
+            { name: 'claude-3-opus', status: 'ready' },
+            { name: 'claude-3-sonnet', status: 'ready' },
+            { name: 'gpt-4', status: 'update_available' },
+            { name: 'llama-2', status: 'ready' }
+          ]
+        };
+      },
+      
+      computed: {
+        topRowMembers() {
+          return this.boardMembers.slice(0, 3);
+        },
+        leftMembers() {
+          return this.boardMembers.slice(3, 5);
+        },
+        rightMembers() {
+          return this.boardMembers.slice(5, 7);
+        }
+      },
+      
+      methods: {
+        async connectWebSocket() {
+          const wsUrl = 'ws://localhost:8302/ws/board';
+          this.ws = new WebSocket(wsUrl);
+          
+          this.ws.onopen = () => {
+            this.wsConnected = true;
+            console.log('WebSocket connected');
+          };
+          
+          this.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            this.handleWebSocketMessage(data);
+          };
+          
+          this.ws.onclose = () => {
+            this.wsConnected = false;
+            console.log('WebSocket disconnected, reconnecting...');
+            setTimeout(() => this.connectWebSocket(), 3000);
+          };
+          
+          this.ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+          };
+        },
+        
+        handleWebSocketMessage(message) {
+          switch (message.type) {
+            case 'board_state':
+              this.boardMembers = message.data.members;
+              this.chairperson = message.data.chairperson;
+              break;
+              
+            case 'conversation_started':
+              this.activeConversation = message.data.conversation_id;
+              this.currentTopic = message.data.topic;
+              break;
+              
+            case 'member_status':
+              const memberIndex = this.boardMembers.findIndex(m => m.id === message.data.member_id);
+              if (memberIndex !== -1) {
+                this.boardMembers[memberIndex].status = message.data.status;
+              }
+              break;
+              
+            case 'member_opinion':
+              console.log('Received member opinion:', message.data);
+              this.conversationMessages.push(message.data);
+              // Update member status
+              const opinionMemberIndex = this.boardMembers.findIndex(m => m.id === message.data.member_id);
+              if (opinionMemberIndex !== -1) {
+                this.boardMembers[opinionMemberIndex].status = message.data.status;
+              }
+              // Check if this message contains decision points
+              if (message.data.decisions) {
+                this.showDecisionPoints(message.data.decisions);
+              }
+              break;
+              
+            case 'autonomous_improvement':
+              this.improvements.unshift(message.data);
+              if (this.improvements.length > 50) {
+                this.improvements = this.improvements.slice(0, 50);
+              }
+              break;
+              
+            case 'model_download_started':
+            case 'model_download_complete':
+              // Update model status
+              const modelIndex = this.availableModels.findIndex(m => m.name === message.data.model);
+              if (modelIndex !== -1) {
+                this.availableModels[modelIndex].status = message.data.status === 'ready' ? 'ready' : 'downloading';
+              }
+              break;
+          }
+        },
+        
+        async fetchBoardMembers() {
+          try {
+            const response = await axios.get('http://localhost:8302/api/board/members');
+            this.boardMembers = response.data.members;
+            this.chairperson = response.data.chairperson;
+          } catch (error) {
+            console.error('Failed to fetch board members:', error);
+          }
+        },
+        
+        async selectChairperson(memberId) {
+          try {
+            const response = await axios.post('http://localhost:8302/api/board/chairperson', {
+              member_id: memberId
+            });
+            if (response.data.success) {
+              this.chairperson = memberId;
+            }
+          } catch (error) {
+            console.error('Failed to set chairperson:', error);
+          }
+        },
+        
+        async startConversation() {
+          if (!this.conversationTopic) return;
+          
+          try {
+            const response = await axios.post('http://localhost:8302/api/board/conversation', {
+              topic: this.conversationTopic,
+              context: { additional_info: this.conversationContext }
+            });
+            
+            if (response.data.success) {
+              this.conversationId = response.data.conversation_id;
+              this.conversationTopic = '';
+              this.conversationContext = '';
+              this.pendingDecisions = [];
+              // Don't clear messages - they'll come via WebSocket
+            }
+          } catch (error) {
+            console.error('Failed to start conversation:', error);
+          }
+        },
+        
+        showDecisionPoints(decisions) {
+          this.pendingDecisions = decisions;
+        },
+        
+        async makeDecision(decisionId, value) {
+          try {
+            const response = await axios.post('http://localhost:8302/api/board/decision', {
+              conversation_id: this.conversationId,
+              decision_id: decisionId,
+              value: value
+            });
+            
+            if (response.data.success) {
+              // Remove this decision from pending
+              this.pendingDecisions = this.pendingDecisions.filter(d => d.id !== decisionId);
+            }
+          } catch (error) {
+            console.error('Failed to process decision:', error);
+          }
+        },
+        
+        async assignTask() {
+          if (!this.taskDescription) return;
+          
+          try {
+            const response = await axios.post('http://localhost:8302/api/board/task', {
+              description: this.taskDescription,
+              type: 'general',
+              priority: parseInt(this.taskPriority)
+            });
+            
+            if (response.data.success) {
+              this.taskDescription = '';
+              this.taskPriority = 5;
+            }
+          } catch (error) {
+            console.error('Failed to assign task:', error);
+          }
+        },
+        
+        async downloadModel(modelName) {
+          try {
+            await axios.post('http://localhost:8302/api/models/download', {
+              model: modelName
+            });
+          } catch (error) {
+            console.error('Failed to download model:', error);
+          }
+        },
+        
+        async checkModelUpdates() {
+          // This would trigger a check on the backend
+          console.log('Checking for model updates...');
+        },
+        
+        async fetchImprovements() {
+          try {
+            const response = await axios.get('http://localhost:8302/api/board/improvements');
+            this.improvements = response.data.improvements;
+          } catch (error) {
+            console.error('Failed to fetch improvements:', error);
+          }
+        },
+        
+        getMemberAvatar(memberId) {
+          const member = this.boardMembers.find(m => m.id === memberId);
+          return member ? member.avatar : '🤖';
+        },
+        
+        formatTime(timestamp) {
+          if (!timestamp) return '';
+          const date = new Date(timestamp);
+          return date.toLocaleTimeString();
+        }
+      },
+      
+      mounted() {
+        this.fetchBoardMembers();
+        this.fetchImprovements();
+        this.connectWebSocket();
+        
+        // Refresh improvements periodically
+        setInterval(() => {
+          this.fetchImprovements();
+        }, 30000);
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
