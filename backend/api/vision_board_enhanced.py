@@ -12,6 +12,9 @@ import asyncio
 import json
 import uuid
 import logging
+import pickle
+import os
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,6 +67,11 @@ class ConversationState:
     pending_decisions: List[Decision]
     user_decisions: Dict = field(default_factory=dict)
     execution_status: Dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+    last_activity: datetime = field(default_factory=datetime.now)
+    status: str = "active"  # active, paused, completed, archived
+    participants: List[str] = field(default_factory=list)
+    session_metadata: Dict = field(default_factory=dict)
 
 class EnhancedVisionBoard:
     """Enhanced Board of Directors with full interactivity"""
@@ -697,6 +705,190 @@ class EnhancedVisionBoard:
         
         return decisions
     
+    # Multi-Session Management Methods
+    async def create_session(self, topic: str, context: Dict = None, session_metadata: Dict = None) -> str:
+        """Create a new conversation session"""
+        session_id = str(uuid.uuid4())
+        
+        # Initialize empty state - will be populated as conversation progresses
+        conversation_state = ConversationState(
+            id=session_id,
+            topic=topic,
+            phase="created",
+            task_analysis={},
+            chair={},
+            resources={},
+            initial_plan={},
+            department_inputs=[],
+            pending_decisions=[],
+            session_metadata=session_metadata or {}
+        )
+        
+        self.conversation_states[session_id] = conversation_state
+        logger.info(f"Created new session: {session_id} for topic: {topic}")
+        
+        return session_id
+    
+    async def get_active_sessions(self) -> List[Dict]:
+        """Get all active conversation sessions"""
+        active_sessions = []
+        for session_id, state in self.conversation_states.items():
+            if state.status == "active":
+                active_sessions.append({
+                    "id": session_id,
+                    "topic": state.topic,
+                    "phase": state.phase,
+                    "created_at": state.created_at.isoformat(),
+                    "last_activity": state.last_activity.isoformat(),
+                    "participants": state.participants,
+                    "pending_decisions_count": len(state.pending_decisions)
+                })
+        return active_sessions
+    
+    async def pause_session(self, session_id: str) -> bool:
+        """Pause a conversation session"""
+        if session_id in self.conversation_states:
+            self.conversation_states[session_id].status = "paused"
+            self.conversation_states[session_id].last_activity = datetime.now()
+            logger.info(f"Paused session: {session_id}")
+            return True
+        return False
+    
+    async def resume_session(self, session_id: str) -> bool:
+        """Resume a paused conversation session"""
+        if session_id in self.conversation_states:
+            state = self.conversation_states[session_id]
+            if state.status == "paused":
+                state.status = "active"
+                state.last_activity = datetime.now()
+                logger.info(f"Resumed session: {session_id}")
+                return True
+        return False
+    
+    async def archive_session(self, session_id: str) -> bool:
+        """Archive a completed conversation session"""
+        if session_id in self.conversation_states:
+            self.conversation_states[session_id].status = "archived"
+            self.conversation_states[session_id].last_activity = datetime.now()
+            logger.info(f"Archived session: {session_id}")
+            return True
+        return False
+    
+    async def get_session_state(self, session_id: str) -> Optional[Dict]:
+        """Get the current state of a conversation session"""
+        if session_id in self.conversation_states:
+            state = self.conversation_states[session_id]
+            return {
+                "id": state.id,
+                "topic": state.topic,
+                "phase": state.phase,
+                "status": state.status,
+                "created_at": state.created_at.isoformat(),
+                "last_activity": state.last_activity.isoformat(),
+                "task_analysis": state.task_analysis,
+                "chair": state.chair,
+                "resources": state.resources,
+                "initial_plan": state.initial_plan,
+                "department_inputs": state.department_inputs,
+                "pending_decisions": [asdict(decision) for decision in state.pending_decisions],
+                "user_decisions": state.user_decisions,
+                "execution_status": state.execution_status,
+                "participants": state.participants,
+                "session_metadata": state.session_metadata
+            }
+        return None
+    
+    async def switch_to_session(self, session_id: str) -> bool:
+        """Switch active context to a specific session"""
+        if session_id in self.conversation_states:
+            # Update last activity for the session being switched to
+            self.conversation_states[session_id].last_activity = datetime.now()
+            logger.info(f"Switched to session: {session_id}")
+            return True
+        return False
+    
+    # Persistence Layer Methods
+    def _get_sessions_dir(self) -> Path:
+        """Get the directory for storing session files"""
+        sessions_dir = Path("/home/patrick/Documents/vision-board-system/database/sessions")
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        return sessions_dir
+    
+    async def save_session(self, session_id: str) -> bool:
+        """Save a session to disk"""
+        try:
+            if session_id not in self.conversation_states:
+                return False
+            
+            sessions_dir = self._get_sessions_dir()
+            session_file = sessions_dir / f"{session_id}.pkl"
+            
+            session_data = self.conversation_states[session_id]
+            with open(session_file, 'wb') as f:
+                pickle.dump(session_data, f)
+            
+            logger.info(f"Saved session {session_id} to disk")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save session {session_id}: {e}")
+            return False
+    
+    async def load_session(self, session_id: str) -> bool:
+        """Load a session from disk"""
+        try:
+            sessions_dir = self._get_sessions_dir()
+            session_file = sessions_dir / f"{session_id}.pkl"
+            
+            if not session_file.exists():
+                return False
+            
+            with open(session_file, 'rb') as f:
+                session_data = pickle.load(f)
+            
+            self.conversation_states[session_id] = session_data
+            logger.info(f"Loaded session {session_id} from disk")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load session {session_id}: {e}")
+            return False
+    
+    async def list_saved_sessions(self) -> List[Dict]:
+        """List all saved sessions on disk"""
+        try:
+            sessions_dir = self._get_sessions_dir()
+            saved_sessions = []
+            
+            for session_file in sessions_dir.glob("*.pkl"):
+                session_id = session_file.stem
+                try:
+                    with open(session_file, 'rb') as f:
+                        session_data = pickle.load(f)
+                    
+                    saved_sessions.append({
+                        "id": session_id,
+                        "topic": session_data.topic,
+                        "status": session_data.status,
+                        "created_at": session_data.created_at.isoformat(),
+                        "last_activity": session_data.last_activity.isoformat(),
+                        "phase": session_data.phase,
+                        "file_path": str(session_file)
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not load session file {session_file}: {e}")
+            
+            return saved_sessions
+        except Exception as e:
+            logger.error(f"Failed to list saved sessions: {e}")
+            return []
+    
+    async def auto_save_session(self, session_id: str):
+        """Automatically save session after state changes"""
+        if session_id in self.conversation_states:
+            # Update last activity timestamp
+            self.conversation_states[session_id].last_activity = datetime.now()
+            # Save to disk
+            await self.save_session(session_id)
+    
     async def broadcast(self, message: Dict, session_id: str = None):
         """Broadcast message to WebSocket clients"""
         message_str = json.dumps(message)
@@ -710,9 +902,9 @@ class EnhancedVisionBoard:
         
         self.websocket_clients -= disconnected
     
-    async def start_conversation(self, topic: str, context: Dict = None) -> str:
+    async def start_conversation(self, topic: str, context: Dict = None, session_id: str = None) -> str:
         """Start an interactive board conversation"""
-        conversation_id = str(uuid.uuid4())
+        conversation_id = session_id or str(uuid.uuid4())
         
         # Phase 1: Task Analysis
         await self.broadcast({
@@ -972,6 +1164,161 @@ async def make_decision(data: Dict[str, Any]):
     return {
         "success": True,
         "result": result
+    }
+
+# Multi-Session API Endpoints
+@app.post("/api/sessions/create")
+async def create_session(data: Dict[str, Any]):
+    """Create a new conversation session"""
+    topic = data.get("topic", "")
+    context = data.get("context", {})
+    session_metadata = data.get("metadata", {})
+    
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic is required")
+    
+    session_id = await vision_board.create_session(topic, context, session_metadata)
+    
+    return {
+        "success": True,
+        "session_id": session_id,
+        "message": f"Created session for: {topic}"
+    }
+
+@app.get("/api/sessions/active")
+async def get_active_sessions():
+    """Get all active conversation sessions"""
+    sessions = await vision_board.get_active_sessions()
+    return {
+        "success": True,
+        "sessions": sessions,
+        "count": len(sessions)
+    }
+
+@app.get("/api/sessions/{session_id}")
+async def get_session_state(session_id: str):
+    """Get the current state of a conversation session"""
+    session_state = await vision_board.get_session_state(session_id)
+    
+    if not session_state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "success": True,
+        "session": session_state
+    }
+
+@app.post("/api/sessions/{session_id}/pause")
+async def pause_session(session_id: str):
+    """Pause a conversation session"""
+    success = await vision_board.pause_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "success": True,
+        "message": f"Session {session_id} paused"
+    }
+
+@app.post("/api/sessions/{session_id}/resume")
+async def resume_session(session_id: str):
+    """Resume a paused conversation session"""
+    success = await vision_board.resume_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found or not paused")
+    
+    return {
+        "success": True,
+        "message": f"Session {session_id} resumed"
+    }
+
+@app.post("/api/sessions/{session_id}/archive")
+async def archive_session(session_id: str):
+    """Archive a completed conversation session"""
+    success = await vision_board.archive_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "success": True,
+        "message": f"Session {session_id} archived"
+    }
+
+@app.post("/api/sessions/{session_id}/switch")
+async def switch_to_session(session_id: str):
+    """Switch active context to a specific session"""
+    success = await vision_board.switch_to_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "success": True,
+        "message": f"Switched to session {session_id}"
+    }
+
+@app.post("/api/sessions/{session_id}/start-conversation")
+async def start_session_conversation(session_id: str):
+    """Start the board conversation for a specific session"""
+    session_state = await vision_board.get_session_state(session_id)
+    
+    if not session_state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if session_state["phase"] != "created":
+        raise HTTPException(status_code=400, detail="Session conversation already started")
+    
+    # Start the conversation using the session's topic
+    conversation_result = await vision_board.start_conversation(session_state["topic"])
+    
+    # Update the session state to reflect that conversation has started
+    await vision_board.switch_to_session(session_id)
+    
+    return {
+        "success": True,
+        "conversation_id": conversation_result,
+        "session_id": session_id,
+        "message": "Board conversation started"
+    }
+
+# Persistence API Endpoints
+@app.get("/api/sessions/saved")
+async def list_saved_sessions():
+    """List all saved sessions on disk"""
+    sessions = await vision_board.list_saved_sessions()
+    return {
+        "success": True,
+        "sessions": sessions,
+        "count": len(sessions)
+    }
+
+@app.post("/api/sessions/{session_id}/save")
+async def save_session(session_id: str):
+    """Save a session to disk"""
+    success = await vision_board.save_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found or save failed")
+    
+    return {
+        "success": True,
+        "message": f"Session {session_id} saved to disk"
+    }
+
+@app.post("/api/sessions/{session_id}/load")
+async def load_session(session_id: str):
+    """Load a session from disk"""
+    success = await vision_board.load_session(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Session file not found or load failed")
+    
+    return {
+        "success": True,
+        "message": f"Session {session_id} loaded from disk"
     }
 
 @app.websocket("/ws")
